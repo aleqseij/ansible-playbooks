@@ -56,7 +56,7 @@
 
     - name: Wait for Kubernetes API to be ready
       ansible.builtin.wait_for:
-        host: "192.168.1.138"
+        host: "192.168.1.83"
         port: 6443
         delay: 10
         timeout: 120
