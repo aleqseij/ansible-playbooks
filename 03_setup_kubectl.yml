@@ -1,15 +1,23 @@
+---
 - name: Setup kubectl access on ansible-control node
   hosts: k8s_master
   become: yes
+  vars:
+    ansible_user: abramovae  # Укажите пользователя, от которого запускается Ansible
+    ansible_become: yes
+    ansible_become_user: root
+    ansible_become_method: sudo
   tasks:
     - name: Check if admin.conf exists on master
       ansible.builtin.stat:
         path: /etc/kubernetes/admin.conf
       register: admin_conf_stat
+      become: yes
+      become_user: root  # Проверяем доступ как root
 
     - name: Fail if admin.conf is missing
       ansible.builtin.fail:
-        msg: "File /etc/kubernetes/admin.conf not found on k8s-master-01. Please verify its existence or rerun 02_init_master.yml. Current path check: {{ admin_conf_stat.stat.path }}"
+        msg: "File /etc/kubernetes/admin.conf not found on k8s-master-01. Please verify its existence or rerun 02_init_master.yml. Current path check: {{ admin_conf_stat.stat.path }}, exists: {{ admin_conf_stat.stat.exists }}"
       when: not admin_conf_stat.stat.exists
 
     - name: Debug file details
@@ -28,21 +36,49 @@
       become: yes
       become_user: root
 
-    - name: Copy kubeconfig to ansible-control node
-      ansible.builtin.fetch:
+    - name: Accept SSH host key for ansible-control
+      ansible.builtin.command: ssh-keyscan -H {{ hostvars[groups['control'][0]]['ansible_host'] }} >> ~/.ssh/known_hosts
+      args:
+        creates: ~/.ssh/known_hosts
+      become: yes
+      become_user: "{{ ansible_user }}"
+
+    - name: Test SSH connectivity to ansible-control
+      ansible.builtin.command: ssh -o BatchMode=yes root@{{ hostvars[groups['control'][0]]['ansible_host'] }} "echo Connection successful"
+      register: ssh_test
+      failed_when: ssh_test.rc != 0
+
+    - name: Debug SSH test result
+      ansible.builtin.debug:
+        msg: "SSH test output: {{ ssh_test.stdout }}"
+      when: ssh_test.rc == 0
+
+    - name: Create temporary copy of admin.conf
+      ansible.builtin.copy:
         src: /etc/kubernetes/admin.conf
+        dest: /tmp/admin.conf
+        remote_src: yes
+        mode: '0600'
+      become: yes
+      become_user: root
+
+    - name: Synchronize admin.conf to ansible-control
+      ansible.posix.synchronize:
+        src: /tmp/admin.conf
         dest: /root/.kube/config
-        flat: yes
+        mode: push
+        rsync_opts:
+          - "--chmod=0600"
       delegate_to: "{{ groups['control'][0] }}"
       become: yes
       become_user: root
-      register: fetch_result
-      failed_when: "'Permission denied' in fetch_result.msg or 'does not exist' in fetch_result.msg"
 
-    - name: Debug fetch result if failed
-      ansible.builtin.debug:
-        msg: "Fetch failed: {{ fetch_result.msg }}"
-      when: fetch_result.failed
+    - name: Remove temporary copy of admin.conf
+      ansible.builtin.file:
+        path: /tmp/admin.conf
+        state: absent
+      become: yes
+      become_user: root
 
     - name: Update kubeconfig with master node IP
       ansible.builtin.replace:
@@ -50,7 +86,7 @@
         regexp: 'server: https://127.0.0.1:6443'
         replace: "server: https://{{ hostvars['k8s-master-01']['ansible_default_ipv4']['address'] }}:6443"
       delegate_to: "{{ groups['control'][0] }}"
-      when: not fetch_result.failed
+      when: not fetch_result.failed | default(false)
 
     - name: Set correct permissions on kubeconfig
       ansible.builtin.file:
@@ -59,7 +95,7 @@
         group: root
         mode: '0600'
       delegate_to: "{{ groups['control'][0] }}"
-      when: not fetch_result.failed
+      when: not fetch_result.failed | default(false)
 
     - name: Install kubectl on ansible-control node
       package:
