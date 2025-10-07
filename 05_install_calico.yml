@@ -1,0 +1,47 @@
+---
+- name: Install Calico CNI on Kubernetes cluster
+  hosts: k8s_master
+  become: yes
+  vars:
+    ansible_user: abramovae
+    ansible_become: yes
+    ansible_become_user: root
+    ansible_become_method: sudo
+    calico_version: "v3.28.5"  # Проверьте актуальность на https://projectcalico.docs.tigera.io
+    pod_cidr: "10.244.0.0/16"
+  tasks:
+    - name: Apply Calico CNI manifest
+      ansible.builtin.command: kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml
+      register: calico_result
+      changed_when: true
+      failed_when: calico_result.rc != 0
+
+    - name: Debug Calico apply result
+      ansible.builtin.debug:
+        msg: "Calico apply result: {{ calico_result.rc }}, stdout: {{ calico_result.stdout }}, stderr: {{ calico_result.stderr }}"
+
+    - name: Configure Calico pod CIDR
+      ansible.builtin.command: kubectl set env daemonset/calico-node -n kube-system CALICO_IPV4POOL_CIDR={{ pod_cidr }}
+      register: config_result
+      changed_when: true
+      failed_when: config_result.rc != 0
+      when: calico_result.rc == 0
+
+    - name: Debug Calico config result
+      ansible.builtin.debug:
+        msg: "Calico config result: {{ config_result.rc }}, stdout: {{ config_result.stdout }}, stderr: {{ config_result.stderr }}"
+      when: calico_result.rc == 0
+
+    - name: Wait for Calico pods to be ready
+      ansible.builtin.command: kubectl wait --for=condition=ready pod -l k8s-app=calico-node -n kube-system --timeout=180s
+      register: wait_result
+      retries: 6
+      delay: 30
+      until: wait_result.rc == 0
+      failed_when: wait_result.rc != 0
+      when: calico_result.rc == 0
+
+    - name: Debug Calico status
+      ansible.builtin.debug:
+        msg: "Calico pods are ready. Output: {{ wait_result.stdout }}"
+      when: wait_result.rc == 0 and calico_result.rc == 0
