@@ -1,0 +1,91 @@
+- name: Setup kubectl access on ansible-control node
+  hosts: k8s_master
+  become: yes
+  tasks:
+    - name: Check if admin.conf exists on master
+      ansible.builtin.stat:
+        path: /etc/kubernetes/admin.conf
+      register: admin_conf_stat
+
+    - name: Fail if admin.conf is missing
+      ansible.builtin.fail:
+        msg: "File /etc/kubernetes/admin.conf not found on k8s-master-01. Please verify its existence or rerun 02_init_master.yml. Current path check: {{ admin_conf_stat.stat.path }}"
+      when: not admin_conf_stat.stat.exists
+
+    - name: Debug file details
+      ansible.builtin.debug:
+        msg: "File exists: {{ admin_conf_stat.stat.exists }}, path: {{ admin_conf_stat.stat.path }}, readable: {{ admin_conf_stat.stat.readable }}, mode: {{ admin_conf_stat.stat.mode }}"
+      when: admin_conf_stat.stat.exists
+
+    - name: Create .kube directory for root
+      ansible.builtin.file:
+        path: /root/.kube
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      delegate_to: "{{ groups['control'][0] }}"
+      become: yes
+      become_user: root
+
+    - name: Copy kubeconfig to ansible-control node
+      ansible.builtin.fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        flat: yes
+      delegate_to: "{{ groups['control'][0] }}"
+      become: yes
+      become_user: root
+      register: fetch_result
+      failed_when: "'Permission denied' in fetch_result.msg or 'does not exist' in fetch_result.msg"
+
+    - name: Debug fetch result if failed
+      ansible.builtin.debug:
+        msg: "Fetch failed: {{ fetch_result.msg }}"
+      when: fetch_result.failed
+
+    - name: Update kubeconfig with master node IP
+      ansible.builtin.replace:
+        path: /root/.kube/config
+        regexp: 'server: https://127.0.0.1:6443'
+        replace: "server: https://{{ hostvars['k8s-master-01']['ansible_default_ipv4']['address'] }}:6443"
+      delegate_to: "{{ groups['control'][0] }}"
+      when: not fetch_result.failed
+
+    - name: Set correct permissions on kubeconfig
+      ansible.builtin.file:
+        path: /root/.kube/config
+        owner: root
+        group: root
+        mode: '0600'
+      delegate_to: "{{ groups['control'][0] }}"
+      when: not fetch_result.failed
+
+    - name: Install kubectl on ansible-control node
+      package:
+        name: kubectl
+        state: present
+      register: kubectl_install
+      delegate_to: "{{ groups['control'][0] }}"
+      become: yes
+      become_user: root
+      retries: 3
+      delay: 5
+      until: kubectl_install.rc == 0
+      failed_when: kubectl_install.rc != 0
+
+    - name: Verify kubectl access
+      ansible.builtin.shell: |
+        kubectl get nodes
+      register: kubectl_nodes
+      delegate_to: "{{ groups['control'][0] }}"
+      become: yes
+      become_user: root
+      retries: 3
+      delay: 5
+      until: kubectl_nodes.rc == 0
+      failed_when: kubectl_nodes.rc != 0
+
+    - name: Display nodes info
+      ansible.builtin.debug:
+        msg: "{{ kubectl_nodes.stdout }}"
