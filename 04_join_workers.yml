@@ -1,0 +1,49 @@
+---
+- name: Join worker nodes to Kubernetes cluster
+  hosts: k8s_workers
+  become: yes
+  vars:
+    ansible_user: abramovae
+    ansible_become: yes
+    ansible_become_user: root
+    ansible_become_method: sudo
+    kubeadm_join_command: "kubeadm join 192.168.1.83:6443 --token mlgn9u.onnb05u2m9tbytam --discovery-token-ca-cert-hash sha256:b024b2e2c3ebcb4ce6d911b9d255259aecaab011724ac3a772381843b748620f"
+  tasks:
+    - name: Install Kubernetes components on worker nodes
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      loop:
+        - kubeadm
+        - kubelet
+        - kubectl
+      become: yes
+      become_user: root
+
+    - name: Hold Kubernetes packages
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+        install_recommends: no
+      loop:
+        - kubeadm
+        - kubelet
+        - kubectl
+      register: hold_result
+      become: yes
+      become_user: root
+
+    - name: Join node to Kubernetes cluster
+      ansible.builtin.command: "{{ kubeadm_join_command }}"
+      register: join_result
+      retries: 3
+      delay: 5
+      until: join_result.rc == 0
+      failed_when: join_result.rc != 0
+
+    - name: Debug join result
+      ansible.builtin.debug:
+        msg: "Join result: {{ join_result.rc }}, output: {{ join_result.stdout }}"
+      when: join_result.rc == 0
