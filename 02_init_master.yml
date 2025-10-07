@@ -1,0 +1,62 @@
+- name: Initialize Kubernetes cluster on master node
+  hosts: k8s_master
+  become: yes
+  vars:
+    k8s_version: "1.28.15"  # Используем только основную версию для kubeadm
+    pod_network_cidr: "10.244.0.0/16"
+  tasks:
+    - name: Pull Kubernetes images
+      ansible.builtin.shell: |
+        kubeadm config images pull --kubernetes-version v{{ k8s_version }}
+      register: image_pull
+      failed_when: image_pull.rc != 0
+      changed_when: image_pull.rc == 0
+
+    - name: Initialize cluster with kubeadm
+      ansible.builtin.shell: |
+        kubeadm init \
+          --pod-network-cidr {{ pod_network_cidr }} \
+          --service-cidr 10.96.0.0/12 \
+          --kubernetes-version v{{ k8s_version }} \
+          --apiserver-advertise-address 192.168.1.83 \
+          --apiserver-cert-extra-sans k8s-master-01
+      register: kubeadm_init
+      args:
+        creates: /etc/kubernetes/admin.conf
+      failed_when: kubeadm_init.rc != 0
+
+    - name: Create .kube directory for root user
+      ansible.builtin.file:
+        path: /root/.kube
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Copy admin config to user directory
+      ansible.builtin.shell: |
+        cp -f /etc/kubernetes/admin.conf /root/.kube/config
+        chown root:root /root/.kube/config
+
+    - name: Extract join command from kubeadm output
+      ansible.builtin.set_fact:
+        join_command: "{{ kubeadm_init.stdout | regex_search('kubeadm join.*?--token') }}"
+
+    - name: Save join command to file
+      ansible.builtin.copy:
+        content: "{{ join_command }}"
+        dest: /tmp/k8s_join_command.txt
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Display join command for verification
+      ansible.builtin.debug:
+        msg: "Join command: {{ join_command }}"
+
+    - name: Wait for Kubernetes API to be ready
+      ansible.builtin.wait_for:
+        host: "192.168.1.138"
+        port: 6443
+        delay: 10
+        timeout: 120
